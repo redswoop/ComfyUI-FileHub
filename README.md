@@ -18,6 +18,9 @@ A single loader node with:
 - **Recents row** (6 by default) showing the most recent files in the active source directory. Auto-refreshes after every generate via `execution_success`.
 - **Source tabs** (`input` · `output` · `temp`) on the recents header, controlling which directory the recents row shows and which the browse modal opens to by default.
 - **Browse modal** with thumbnail grid, mtime / name sort, search filter, subfolder navigation, and pagination (handles dirs with thousands of files without choking).
+
+  ![Browse modal screenshot](docs/screenshot-browser.png)
+
 - **Drag-drop file from your desktop** onto a pin slot — uploads to `input/` and pins it.
 - **Right-click a pin** for a context menu: replace from filesystem, browse, promote to input/, soft-delete, unpin.
 
