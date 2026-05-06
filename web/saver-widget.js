@@ -72,11 +72,14 @@ export function mountSaver(node) {
   tgtLabel.style.cssText = "font-size:10px; color:#888; text-transform:uppercase;";
 
   const loaderSel = document.createElement("select");
+  // The slot input is 1-based to match the visible pin labels (1,2,3,4 in the
+  // loader UI). Internally `state.slot` stays 0-based so the backend doesn't care.
   const slotInp = document.createElement("input");
   slotInp.type = "number";
-  slotInp.min = "0";
+  slotInp.min = "1";
   slotInp.style.width = "50px";
-  slotInp.placeholder = "slot";
+  slotInp.placeholder = "pin#";
+  slotInp.title = "Pin number (1 = first pin slot in the loader)";
 
   const refreshBtn = document.createElement("button");
   refreshBtn.className = "fh-icon-btn";
@@ -91,7 +94,8 @@ export function mountSaver(node) {
   });
   slotInp.addEventListener("change", () => {
     const n = parseInt(slotInp.value, 10);
-    state.slot = Number.isFinite(n) && n >= 0 ? n : null;
+    // UI is 1-based; convert to 0-based for storage.
+    state.slot = Number.isFinite(n) && n >= 1 ? n - 1 : null;
     writeBack();
   });
 
@@ -133,7 +137,8 @@ export function mountSaver(node) {
         writeBack();
       }
     }
-    if (state.slot != null) slotInp.value = String(state.slot);
+    // 0-based internal → 1-based UI display.
+    if (state.slot != null) slotInp.value = String(state.slot + 1);
   }
 
   function renderTargetVisibility() {
