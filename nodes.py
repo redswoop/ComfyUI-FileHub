@@ -222,6 +222,14 @@ class FileHubSaver:
                         "(e.g. %Empty Latent Image.width%)."
                     ),
                 }),
+                "embed_metadata": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": (
+                        "Embed prompt + workflow JSON into PNG tEXt chunks. "
+                        "Disable for privacy when sharing, or when the workflow "
+                        "metadata is large enough to bloat the file."
+                    ),
+                }),
                 "target": ("STRING", {"default": '{"destination":"output"}', "multiline": False}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
@@ -267,8 +275,8 @@ class FileHubSaver:
         img.save(full_path, pnginfo=metadata, compress_level=self.compress_level)
         return full_path, out_name, subfolder
 
-    def save(self, images, filename_prefix="FileHub", target='{"destination":"output"}',
-             prompt=None, extra_pnginfo=None):
+    def save(self, images, filename_prefix="FileHub", embed_metadata=True,
+             target='{"destination":"output"}', prompt=None, extra_pnginfo=None):
         cfg = self._parse_target(target)
         dest = cfg["destination"]
 
@@ -283,7 +291,7 @@ class FileHubSaver:
 
         for batch_idx, image in enumerate(images):
             metadata = None
-            if not comfy_args.disable_metadata:
+            if embed_metadata and not comfy_args.disable_metadata:
                 metadata = PngInfo()
                 if prompt is not None:
                     metadata.add_text("prompt", json.dumps(prompt))
