@@ -1,14 +1,17 @@
-// FileHubLoader DOM widget. Owns per-node state, renders pin strip + recents,
-// drives the hidden `selection` STRING widget that the Python backend reads.
+// FileHubLoader UI — fully canvas-rendered.
+// Layout (top of node body, below the title bar):
+//   - Pin row: N tiles, top-left, parallel to the output socket column.
+//   - Action button row (horizontal text buttons), full-width, ABOVE recents.
+//     Buttons: [Browse] [Pin sets] [Refresh] [Source: <tab> ▾]
+//   - Recents row: smaller tiles below the action button row.
+// Icon-size preset (small/medium/large) controls pin + recent tile sizes.
 
 import { openBrowserModal, openPinsetModal } from "./pinset-modal.js";
 
 const { app } = window.comfyAPI.app;
 const { api } = window.comfyAPI.api;
 
-const ICON = {
-  video: "▶", audio: "♪", other: "?", image: "",
-};
+const ICON = { video: "▶", audio: "♪", other: "?", image: "" };
 
 const PLACEHOLDER_SVG =
   "data:image/svg+xml;utf8," +
@@ -25,7 +28,45 @@ const DEFAULT_STATE = () => ({
   recents_count: 6,
   source_tab: "input",
   auto_roll: false,
+  icon_size: "medium",
 });
+
+// --- Layout: size presets and constants -------------------------------------
+
+const SIZE_PRESETS = {
+  small:  { pin: 48, recent: 32 },
+  medium: { pin: 64, recent: 48 },
+  large:  { pin: 80, recent: 64 },
+};
+function tileSizes(state) {
+  return SIZE_PRESETS[state.icon_size] || SIZE_PRESETS.medium;
+}
+
+const PAD_X = 8;
+const PIN_GAP = 4;
+const PIN_PAD_Y = 4;
+const REC_GAP = 4;
+const PIN_TO_ACTION_GAP = 8;
+const ACTION_TO_RECENTS_GAP = 4;
+const ACTION_BTN_H = 22;
+const ACTION_BTN_PAD_X = 10;
+const ACTION_BTN_GAP = 4;
+const SOCKET_COL_W = 96;
+
+const ACTION_FONT = "11px sans-serif";
+
+function pinSlotRect(i, state) {
+  const { pin } = tileSizes(state);
+  return { x: PAD_X + i * (pin + PIN_GAP), w: pin, h: pin };
+}
+function pinGridWidth(count, state) {
+  const { pin } = tileSizes(state);
+  return PAD_X * 2 + count * pin + (count - 1) * PIN_GAP;
+}
+function recSlotRect(i, state) {
+  const { recent } = tileSizes(state);
+  return { x: PAD_X + i * (recent + REC_GAP), w: recent, h: recent };
+}
 
 function thumbUrl(slot) {
   if (!slot || !slot.filename) return PLACEHOLDER_SVG;
@@ -42,9 +83,7 @@ function thumbUrl(slot) {
     params.set("channel", "rgb");
     return `/view?${params}`;
   }
-  if (isVideo) {
-    return `/filehub/poster?${params}`;
-  }
+  if (isVideo) return `/filehub/poster?${params}`;
   return PLACEHOLDER_SVG;
 }
 
@@ -57,9 +96,6 @@ function kindOf(slot) {
   return "other";
 }
 
-// Visually hide a STRING widget without changing its `type` — keeping the native
-// type "STRING" ensures the widget value is included in the queued prompt.
-// (Setting widget.type = "hidden" risks the frontend filtering it out at prompt build.)
 function hideStringWidget(w) {
   w.computeSize = () => [0, -4];
   w.draw = () => {};
@@ -75,7 +111,6 @@ function slotEqual(a, b) {
 }
 
 export function mountLoader(node) {
-  // Find the hidden `selection` widget the backend reads.
   const selWidget = node.widgets?.find((w) => w.name === "selection");
   if (!selWidget) {
     console.warn("[FileHub] selection widget missing on FileHubLoader");
@@ -83,9 +118,6 @@ export function mountLoader(node) {
   }
   hideStringWidget(selWidget);
 
-  // Mutable per-node state. Populated from selWidget.value on mount AND on
-  // workflow restore (onConfigure runs *after* widget values are rehydrated).
-  // Keep mutating this object — closures below capture it by reference.
   const state = DEFAULT_STATE();
   node._fh = state;
 
@@ -100,322 +132,352 @@ export function mountLoader(node) {
     while (state.pins.length < state.pin_count) state.pins.push(null);
     state.pins.length = state.pin_count;
     if (!Array.isArray(state.recents)) state.recents = [];
+    if (!SIZE_PRESETS[state.icon_size]) state.icon_size = "medium";
   }
   loadStateFromWidget();
 
-  // -- DOM scaffold --------------------------------------------------------
-
-  const root = document.createElement("div");
-  root.className = "fh-root";
-
-  // Top toolbar: just action buttons (browse / pinsets / refresh).
-  const toolbar = document.createElement("div");
-  toolbar.className = "fh-tabs";
-  const toolbarSpacer = document.createElement("span");
-  toolbarSpacer.className = "fh-spacer";
-  toolbar.appendChild(toolbarSpacer);
-
-  const browseBtn = document.createElement("button");
-  browseBtn.className = "fh-icon-btn";
-  browseBtn.title = "Browse files";
-  browseBtn.textContent = "···";
-  browseBtn.addEventListener("click", () => openBrowser());
-  toolbar.appendChild(browseBtn);
-
-  const setBtn = document.createElement("button");
-  setBtn.className = "fh-icon-btn";
-  setBtn.title = "Pin sets";
-  setBtn.textContent = "★";
-  setBtn.addEventListener("click", () =>
-    openPinsetModal({
-      currentPins: state.pins,
-      onLoad: (slots) => {
-        state.pins = slots.slice(0, state.pin_count);
-        while (state.pins.length < state.pin_count) state.pins.push(null);
-        renderPins();
-        writeBack();
-      },
-    }),
-  );
-  toolbar.appendChild(setBtn);
-
-  const refreshBtn = document.createElement("button");
-  refreshBtn.className = "fh-icon-btn";
-  refreshBtn.title = "Refresh recents";
-  refreshBtn.textContent = "⟳";
-  refreshBtn.addEventListener("click", () => refreshRecents());
-  toolbar.appendChild(refreshBtn);
-
-  // Pinned section
-  const pinnedLabel = document.createElement("div");
-  pinnedLabel.className = "fh-section-label";
-  pinnedLabel.textContent = "Pinned";
-
-  const pinnedStrip = document.createElement("div");
-  pinnedStrip.className = "fh-strip";
-
-  // Recents header — label + source-tab selector inline. Tabs filter the
-  // recents row's source dir AND the default tab the browser modal opens to.
-  const recentsHeader = document.createElement("div");
-  recentsHeader.className = "fh-recents-header";
-  const recentsLabel = document.createElement("span");
-  recentsLabel.className = "fh-section-label";
-  recentsLabel.textContent = "Recents";
-  recentsHeader.appendChild(recentsLabel);
-
-  const tabs = document.createElement("div");
-  tabs.className = "fh-tabs";
-  const tabBtns = {};
-  for (const t of ["input", "output", "temp"]) {
-    const b = document.createElement("button");
-    b.className = "fh-tab";
-    b.textContent = t;
-    b.addEventListener("click", () => {
-      if (state.source_tab === t) return;
-      state.source_tab = t;
-      writeBack();
-      renderTabs();
-      refreshRecents();
-    });
-    tabs.appendChild(b);
-    tabBtns[t] = b;
-  }
-  recentsHeader.appendChild(tabs);
-
-  const recentsStrip = document.createElement("div");
-  recentsStrip.className = "fh-strip";
-
-  // Active filename ribbon
-  const activeName = document.createElement("div");
-  activeName.className = "fh-active-name";
-  activeName.textContent = "(no file selected)";
-
-  root.appendChild(toolbar);
-  root.appendChild(pinnedLabel);
-  root.appendChild(pinnedStrip);
-  root.appendChild(recentsHeader);
-  root.appendChild(recentsStrip);
-  root.appendChild(activeName);
-
-  // -- Mount ---------------------------------------------------------------
-
-  node.addDOMWidget("filehub_ui", "FileHubWidget", root, {
-    serialize: false,
-    hideOnZoom: false,
-    getMinHeight: () => 220,
-  });
-  node.size = node.size || [320, 280];
-  if (node.size[0] < 320) node.size[0] = 320;
-
-  // -- Render --------------------------------------------------------------
-
-  function renderTabs() {
-    for (const t of Object.keys(tabBtns)) {
-      tabBtns[t].classList.toggle("active", state.source_tab === t);
-    }
+  function writeBack() {
+    selWidget.value = JSON.stringify(state);
+    if (selWidget.callback) selWidget.callback(selWidget.value);
   }
 
-  function renderPins() {
-    pinnedStrip.innerHTML = "";
-    for (let i = 0; i < state.pin_count; i++) {
-      const slot = state.pins[i];
-      const el = document.createElement("div");
-      el.className = "fh-slot " + (slot ? "filled" : "empty");
-      if (state.active_index === i && slot) el.classList.add("active");
-      el.dataset.slot = String(i);
-      el.draggable = !!slot;
+  // --- Image caches ---------------------------------------------------------
 
-      const num = document.createElement("span");
-      num.className = "fh-slot-num";
-      num.textContent = String(i + 1);
-      el.appendChild(num);
+  const pinImages = new Array(state.pin_count).fill(null);
+  const recentImages = [];
 
-      if (slot) {
-        const img = document.createElement("img");
-        img.src = thumbUrl(slot);
-        img.draggable = false;
-        img.onerror = () => {
-          img.src = PLACEHOLDER_SVG;
-        };
-        img.alt = slot.filename;
-        el.appendChild(img);
-
-        const k = kindOf(slot);
-        if (k !== "image") {
-          const icon = document.createElement("span");
-          icon.className = "fh-slot-icon";
-          icon.textContent = ICON[k] || ICON.other;
-          el.appendChild(icon);
-        }
-
-        const x = document.createElement("span");
-        x.className = "fh-slot-x";
-        x.textContent = "×";
-        x.title = "Unpin";
-        x.addEventListener("click", (e) => {
-          e.stopPropagation();
-          state.pins[i] = null;
-          if (state.active_index === i) {
-            state.active_index = null;
-            state.active = null;
-          }
-          renderPins();
-          renderActive();
-          writeBack();
-        });
-        el.appendChild(x);
-
-        el.title = `${slot.filename} [${slot.type}]`;
-        el.addEventListener("click", () => activatePin(i));
-        el.addEventListener("contextmenu", (e) => {
-          e.preventDefault();
-          openPinContextMenu(i, e.clientX, e.clientY);
-        });
-
-        // drag-out: support reordering / swap by dragging onto another pin slot.
-        el.addEventListener("dragstart", (e) => {
-          e.dataTransfer.setData("application/x-filehub-pin", String(i));
-          e.dataTransfer.effectAllowed = "move";
-        });
-      } else {
-        el.title = "Empty pin slot — click to browse, drag a file to upload";
-        el.addEventListener("click", () => openBrowser({ targetSlot: i }));
-      }
-
-      // drop target
-      el.addEventListener("dragover", (e) => {
-        if (
-          e.dataTransfer.types.includes("Files") ||
-          e.dataTransfer.types.includes("application/x-filehub-pin") ||
-          e.dataTransfer.types.includes("application/x-filehub-recent")
-        ) {
-          e.preventDefault();
-          el.classList.add("dragover");
-        }
-      });
-      el.addEventListener("dragleave", () => el.classList.remove("dragover"));
-      el.addEventListener("drop", async (e) => {
-        e.preventDefault();
-        el.classList.remove("dragover");
-        const pinIdx = e.dataTransfer.getData("application/x-filehub-pin");
-        const recentIdx = e.dataTransfer.getData("application/x-filehub-recent");
-        if (pinIdx) {
-          // swap pins
-          const from = parseInt(pinIdx, 10);
-          if (Number.isInteger(from) && from !== i) {
-            const tmp = state.pins[i];
-            state.pins[i] = state.pins[from];
-            state.pins[from] = tmp;
-            renderPins();
-            writeBack();
-          }
-          return;
-        }
-        if (recentIdx) {
-          const r = parseInt(recentIdx, 10);
-          const slotR = state.recents[r];
-          if (slotR) {
-            state.pins[i] = { ...slotR };
-            renderPins();
-            writeBack();
-          }
-          return;
-        }
-        // file from OS
-        const f = e.dataTransfer.files?.[0];
-        if (f) await uploadAndPin(f, i);
-      });
-
-      pinnedStrip.appendChild(el);
-    }
-  }
-
-  function renderRecents() {
-    recentsStrip.innerHTML = "";
-    const list = state.recents.slice(0, state.recents_count);
-    if (!list.length) {
-      const empty = document.createElement("div");
-      empty.style.cssText = "font-size:10px;color:#555;padding:4px;";
-      empty.textContent = "(no recents yet)";
-      recentsStrip.appendChild(empty);
+  function loadImageInto(target, idx, slot) {
+    if (!slot) {
+      target[idx] = null;
       return;
     }
-    for (let i = 0; i < list.length; i++) {
-      const slot = list[i];
-      const el = document.createElement("div");
-      el.className = "fh-slot fh-recent filled";
-      if (state.active && slotEqual(state.active, slot) && state.active_index === null) {
-        el.classList.add("active");
+    const url = thumbUrl(slot);
+    if (target[idx] && target[idx]._fhUrl === url && target[idx].complete) return;
+    const img = new Image();
+    img._fhUrl = url;
+    img.onload = () => node.setDirtyCanvas(true, true);
+    img.onerror = () => {
+      if (img._fhUrl !== PLACEHOLDER_SVG) {
+        img._fhUrl = PLACEHOLDER_SVG;
+        img.src = PLACEHOLDER_SVG;
       }
-      el.draggable = true;
-      el.title = `${slot.filename} [${slot.type}]`;
+    };
+    img.src = url;
+    target[idx] = img;
+  }
 
-      const img = document.createElement("img");
-      img.src = thumbUrl(slot);
-      img.draggable = false;
-      img.onerror = () => (img.src = PLACEHOLDER_SVG);
-      el.appendChild(img);
+  function refreshPinImages() {
+    for (let i = 0; i < state.pin_count; i++) loadImageInto(pinImages, i, state.pins[i]);
+    node.setDirtyCanvas(true, true);
+  }
 
+  function refreshRecentImages() {
+    recentImages.length = state.recents.length;
+    for (let i = 0; i < state.recents.length; i++) loadImageInto(recentImages, i, state.recents[i]);
+    node.setDirtyCanvas(true, true);
+  }
+
+  // --- Layout helpers -------------------------------------------------------
+
+  function titleH() {
+    return (typeof LiteGraph !== "undefined" && LiteGraph.NODE_TITLE_HEIGHT) || 30;
+  }
+  function pinAreaTop() { return titleH() + PIN_PAD_Y; }
+  function actionRowTop() {
+    return pinAreaTop() + tileSizes(state).pin + PIN_TO_ACTION_GAP;
+  }
+  function recentsAreaTop() {
+    return actionRowTop() + ACTION_BTN_H + ACTION_TO_RECENTS_GAP;
+  }
+  function bodyMinHeight() {
+    const { recent } = tileSizes(state);
+    return PIN_PAD_Y + tileSizes(state).pin + PIN_TO_ACTION_GAP + ACTION_BTN_H + ACTION_TO_RECENTS_GAP + recent + 8;
+  }
+
+  // --- Action buttons (horizontal row above recents) ------------------------
+
+  // Each entry: { label: string|()=>string, click: (e)=>void, contextClick?: (e)=>void }
+  const actionDefs = [
+    { label: () => "Browse",   click: () => openBrowser() },
+    { label: () => "Pin sets", click: () => openPinsetsAction() },
+    { label: () => "Refresh",  click: () => refreshRecents() },
+    { label: () => `Source: ${state.source_tab} ▾`, click: (e) => openSourceMenu(e) },
+  ];
+  // Each draw cycle populates this from the live ctx (we need ctx to measure text).
+  let actionRects = [];
+
+  function buttonLabel(d) {
+    return typeof d.label === "function" ? d.label() : d.label;
+  }
+
+  function measureButtonWidth(ctx, label) {
+    ctx.font = ACTION_FONT;
+    return Math.ceil(ctx.measureText(label).width) + ACTION_BTN_PAD_X * 2;
+  }
+
+  function actionHitTest(localX, localY) {
+    for (let i = 0; i < actionRects.length; i++) {
+      const r = actionRects[i];
+      if (!r) continue;
+      if (localX >= r.x && localX <= r.x + r.w && localY >= r.y && localY <= r.y + r.h) return i;
+    }
+    return -1;
+  }
+
+  // --- Hit tests: pins + recents -------------------------------------------
+
+  function pinHitTest(localX, localY) {
+    const top = pinAreaTop();
+    const { pin } = tileSizes(state);
+    if (localY < top || localY > top + pin) return -1;
+    for (let i = 0; i < state.pin_count; i++) {
+      const r = pinSlotRect(i, state);
+      if (localX >= r.x && localX <= r.x + r.w) return i;
+    }
+    return -1;
+  }
+  function recentHitTest(localX, localY) {
+    const top = recentsAreaTop();
+    const { recent } = tileSizes(state);
+    if (localY < top || localY > top + recent) return -1;
+    for (let i = 0; i < state.recents.length; i++) {
+      const r = recSlotRect(i, state);
+      if (localX >= r.x && localX <= r.x + r.w) return i;
+    }
+    return -1;
+  }
+
+  // --- Drawing primitives ---------------------------------------------------
+
+  function drawTile(ctx, x, y, size, slot, img, opts = {}) {
+    ctx.fillStyle = "#1a1a1a";
+    ctx.fillRect(x, y, size, size);
+
+    if (slot && img && img.complete && img.naturalWidth > 0) {
+      const ratio = Math.min(size / img.naturalWidth, size / img.naturalHeight);
+      const w = img.naturalWidth * ratio;
+      const h = img.naturalHeight * ratio;
+      ctx.drawImage(img, x + (size - w) / 2, y + (size - h) / 2, w, h);
+    } else if (!slot) {
+      ctx.save();
+      ctx.strokeStyle = "#444";
+      ctx.setLineDash([3, 3]);
+      ctx.strokeRect(x + 1.5, y + 1.5, size - 3, size - 3);
+      ctx.setLineDash([]);
+      if (size >= 40) {
+        ctx.fillStyle = "#555";
+        ctx.font = `${Math.floor(size / 3)}px sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("+", x + size / 2, y + size / 2);
+      }
+      ctx.restore();
+    }
+
+    const isActive = !!opts.active;
+    ctx.strokeStyle = isActive ? "#46b4e6" : "#333";
+    ctx.lineWidth = isActive ? 2 : 1;
+    const inset = isActive ? 1 : 0.5;
+    ctx.strokeRect(x + inset, y + inset, size - inset * 2, size - inset * 2);
+    ctx.lineWidth = 1;
+
+    if (opts.label) {
+      ctx.fillStyle = "rgba(0,0,0,0.6)";
+      ctx.fillRect(x + 2, y + 2, 12, 11);
+      ctx.fillStyle = "#aaa";
+      ctx.font = "9px sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(opts.label, x + 4, y + 3);
+    }
+
+    if (slot) {
       const k = kindOf(slot);
       if (k !== "image") {
-        const icon = document.createElement("span");
-        icon.className = "fh-slot-icon";
-        icon.textContent = ICON[k] || ICON.other;
-        el.appendChild(icon);
+        const iconSize = size >= 48 ? 12 : 10;
+        ctx.fillStyle = "rgba(0,0,0,0.6)";
+        ctx.fillRect(x + size - iconSize - 2, y + size - iconSize - 1, iconSize, iconSize - 1);
+        ctx.fillStyle = "#ddd";
+        ctx.font = `${iconSize - 3}px sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(ICON[k] || ICON.other, x + size - iconSize / 2 - 2, y + size - iconSize / 2 - 1);
       }
+    }
+  }
 
-      el.addEventListener("click", () => activateAdHoc(slot));
-      el.addEventListener("dragstart", (e) => {
-        e.dataTransfer.setData("application/x-filehub-recent", String(i));
-        e.dataTransfer.effectAllowed = "copy";
+  function drawTextButton(ctx, x, y, w, h, label) {
+    ctx.fillStyle = "#262626";
+    ctx.strokeStyle = "#444";
+    ctx.lineWidth = 1;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    ctx.fillStyle = "#ddd";
+    ctx.font = ACTION_FONT;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, x + w / 2, y + h / 2 + 1);
+  }
+
+  // --- onDrawForeground -----------------------------------------------------
+
+  const origDraw = node.onDrawForeground;
+  node.onDrawForeground = function (ctx) {
+    if (origDraw) origDraw.apply(this, arguments);
+    if (this.flags?.collapsed) return;
+
+    const { pin, recent } = tileSizes(state);
+
+    // Pin row
+    const pinTop = pinAreaTop();
+    for (let i = 0; i < state.pin_count; i++) {
+      const r = pinSlotRect(i, state);
+      drawTile(ctx, r.x, pinTop, pin, state.pins[i], pinImages[i], {
+        active: state.active_index === i && !!state.pins[i],
+        label: String(i + 1),
       });
-      recentsStrip.appendChild(el);
     }
-  }
 
-  function renderActive() {
-    if (state.active && state.active.filename) {
-      activeName.textContent = `${state.active.filename} [${state.active.type}${state.active.subfolder ? "/" + state.active.subfolder : ""}]`;
+    // Action button row (above recents)
+    const actY = actionRowTop();
+    let cursorX = PAD_X;
+    actionRects = [];
+    for (let i = 0; i < actionDefs.length; i++) {
+      const lbl = buttonLabel(actionDefs[i]);
+      const w = measureButtonWidth(ctx, lbl);
+      drawTextButton(ctx, cursorX, actY, w, ACTION_BTN_H, lbl);
+      actionRects.push({ x: cursorX, y: actY, w, h: ACTION_BTN_H });
+      cursorX += w + ACTION_BTN_GAP;
+    }
+
+    // Recents row
+    const recTop = recentsAreaTop();
+    if (!state.recents.length) {
+      ctx.fillStyle = "#555";
+      ctx.font = "10px sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText("(no recents)", PAD_X, recTop + recent / 3);
     } else {
-      activeName.textContent = "(no file selected)";
+      for (let i = 0; i < state.recents.length; i++) {
+        const r = recSlotRect(i, state);
+        const slot = state.recents[i];
+        const isActive =
+          state.active_index === null && state.active && slotEqual(state.active, slot);
+        drawTile(ctx, r.x, recTop, recent, slot, recentImages[i], { active: isActive });
+      }
     }
+  };
+
+  // --- Mouse handling -------------------------------------------------------
+
+  const origMouseDown = node.onMouseDown;
+  node.onMouseDown = function (e, localPos) {
+    const lx = localPos[0], ly = localPos[1];
+
+    const ai = actionHitTest(lx, ly);
+    if (ai >= 0) {
+      const def = actionDefs[ai];
+      if (e.button === 2) {
+        if (def.contextClick) def.contextClick(e);
+        else openSettingsMenu(e);
+      } else if (e.button === 0) {
+        def.click(e);
+      }
+      return true;
+    }
+
+    const pi = pinHitTest(lx, ly);
+    if (pi >= 0) {
+      if (e.button === 2) openPinContextMenu(pi, e);
+      else if (e.button === 0) {
+        if (state.pins[pi]) activatePin(pi);
+        else openBrowser({ targetSlot: pi });
+      }
+      return true;
+    }
+
+    const ri = recentHitTest(lx, ly);
+    if (ri >= 0) {
+      if (e.button === 2) openRecentContextMenu(ri, e);
+      else if (e.button === 0) activateAdHoc(state.recents[ri]);
+      return true;
+    }
+
+    return origMouseDown ? origMouseDown.apply(this, arguments) : false;
+  };
+
+  // Reset cursor on hover so it isn't a crosshair (litegraph default for some
+  // canvas regions). Setting on the canvas element directly works across the
+  // whole node body.
+  const origMouseEnter = node.onMouseEnter;
+  node.onMouseEnter = function (e) {
+    if (origMouseEnter) origMouseEnter.apply(this, arguments);
+    const c = app?.canvas?.canvas;
+    if (c) c.style.cursor = "default";
+  };
+  const origMouseLeave = node.onMouseLeave;
+  node.onMouseLeave = function (e) {
+    if (origMouseLeave) origMouseLeave.apply(this, arguments);
+    const c = app?.canvas?.canvas;
+    if (c) c.style.cursor = "";
+  };
+
+  // --- Sizing ---------------------------------------------------------------
+
+  function actionRowMinWidth() {
+    // Approximate: rough text measurement without ctx (~7 px/char + padding).
+    const labels = actionDefs.map(buttonLabel);
+    let w = PAD_X * 2;
+    for (let i = 0; i < labels.length; i++) {
+      w += Math.ceil(labels[i].length * 6.5) + ACTION_BTN_PAD_X * 2;
+      if (i > 0) w += ACTION_BTN_GAP;
+    }
+    return w;
+  }
+  function minWidth() {
+    return Math.max(
+      360,
+      pinGridWidth(state.pin_count, state) + SOCKET_COL_W,
+      actionRowMinWidth(),
+    );
   }
 
-  function renderAll() {
-    renderTabs();
-    renderPins();
-    renderRecents();
-    renderActive();
+  const origComputeSize = node.computeSize;
+  node.computeSize = function () {
+    const sz = origComputeSize ? origComputeSize.apply(this, arguments) : [minWidth(), 60];
+    sz[0] = Math.max(sz[0], minWidth());
+    sz[1] = Math.max(sz[1], titleH() + bodyMinHeight());
+    return sz;
+  };
+  function reflowToMinSize() {
+    if (!node.size || node.size[0] < minWidth() || node.size[1] < titleH() + bodyMinHeight()) {
+      node.size = node.computeSize();
+    }
+    node.setDirtyCanvas(true, true);
   }
+  reflowToMinSize();
 
-  // -- Actions -------------------------------------------------------------
+  // --- Actions --------------------------------------------------------------
 
   function activatePin(i) {
     const slot = state.pins[i];
     if (!slot) return;
     state.active_index = i;
     state.active = { ...slot };
-    renderPins();
-    renderActive();
+    node.setDirtyCanvas(true, true);
     writeBack();
   }
-
   function activateAdHoc(slot) {
     state.active_index = null;
     state.active = { ...slot };
-    renderPins();
-    renderRecents();
-    renderActive();
+    node.setDirtyCanvas(true, true);
     writeBack();
   }
-
   function setPin(i, slot) {
     state.pins[i] = slot ? { ...slot } : null;
-    if (state.active_index === i) {
-      state.active = slot ? { ...slot } : null;
-    }
-    renderPins();
-    renderActive();
+    if (state.active_index === i) state.active = slot ? { ...slot } : null;
+    refreshPinImages();
     writeBack();
   }
 
@@ -429,26 +491,30 @@ export function mountLoader(node) {
           activatePin(targetSlot);
           return;
         }
-        // No specific slot — fill empty slots in order, then overflow into active.
         let placed = 0;
         for (let i = 0; i < state.pin_count && placed < slots.length; i++) {
-          if (!state.pins[i]) {
-            state.pins[i] = { ...slots[placed++] };
-          }
+          if (!state.pins[i]) state.pins[i] = { ...slots[placed++] };
         }
-        renderPins();
+        refreshPinImages();
         writeBack();
-        if (placed === 0 && slots.length) {
-          // All pins were full; just activate the first picked file ad-hoc.
-          activateAdHoc(slots[0]);
-        }
+        if (placed === 0 && slots.length) activateAdHoc(slots[0]);
+      },
+    });
+  }
+
+  function openPinsetsAction() {
+    openPinsetModal({
+      currentPins: state.pins,
+      onLoad: (slots) => {
+        state.pins = slots.slice(0, state.pin_count);
+        while (state.pins.length < state.pin_count) state.pins.push(null);
+        refreshPinImages();
+        writeBack();
       },
     });
   }
 
   async function uploadAndPin(file, slotIdx) {
-    // Guard against synthesized "files" produced by in-page <img> drags
-    // (Chrome turns the URL into a File with the URL as its name).
     if (!file.name || /[\/:?]|^https?:/i.test(file.name)) {
       console.warn("[FileHub] ignoring drop with URL-shaped name:", file.name);
       return;
@@ -478,29 +544,66 @@ export function mountLoader(node) {
     activatePin(slotIdx);
   }
 
-  function openPinContextMenu(i, x, y) {
-    const slot = state.pins[i];
-    if (!slot) return;
+  // --- Context menus --------------------------------------------------------
+
+  function openSourceMenu(event) {
+    const items = ["input", "output", "temp"].map((t) => ({
+      content: `${t}${state.source_tab === t ? " ✓" : ""}`,
+      callback: () => {
+        if (state.source_tab === t) return;
+        state.source_tab = t;
+        writeBack();
+        refreshRecents();
+        node.setDirtyCanvas(true, true);
+      },
+    }));
+    new LiteGraph.ContextMenu(items, { event });
+  }
+
+  function openSettingsMenu(event) {
     const items = [
-      { label: "Activate", run: () => activatePin(i) },
+      ...["small", "medium", "large"].map((s) => ({
+        content: `Icon size: ${s}${state.icon_size === s ? " ✓" : ""}`,
+        callback: () => {
+          if (state.icon_size === s) return;
+          state.icon_size = s;
+          writeBack();
+          reflowToMinSize();
+        },
+      })),
+      null,
       {
-        label: "Replace from filesystem…",
-        run: () => {
-          const inp = document.createElement("input");
-          inp.type = "file";
-          inp.onchange = () => {
-            const f = inp.files?.[0];
-            if (f) uploadAndPin(f, i);
-          };
-          inp.click();
+        content: `Auto-roll latest output into slot 1${state.auto_roll ? " ✓" : ""}`,
+        callback: () => {
+          state.auto_roll = !state.auto_roll;
+          writeBack();
         },
       },
-      { label: "Browse…", run: () => openBrowser({ targetSlot: i }) },
     ];
-    if (slot.type !== "input") {
+    new LiteGraph.ContextMenu(items, { event });
+  }
+
+  function openPinContextMenu(i, event) {
+    const slot = state.pins[i];
+    const items = [];
+    if (slot) items.push({ content: "Activate", callback: () => activatePin(i) });
+    items.push({
+      content: "Replace from filesystem…",
+      callback: () => {
+        const inp = document.createElement("input");
+        inp.type = "file";
+        inp.onchange = () => {
+          const f = inp.files?.[0];
+          if (f) uploadAndPin(f, i);
+        };
+        inp.click();
+      },
+    });
+    items.push({ content: "Browse…", callback: () => openBrowser({ targetSlot: i }) });
+    if (slot && slot.type !== "input") {
       items.push({
-        label: "Promote to input/",
-        run: async () => {
+        content: "Promote to input/",
+        callback: async () => {
           try {
             const r = await fetch("/filehub/promote", {
               method: "POST",
@@ -521,32 +624,74 @@ export function mountLoader(node) {
         },
       });
     }
-    items.push({
-      label: "Delete file (soft)",
-      run: async () => {
-        if (!confirm(`Move ${slot.filename} to ${slot.type}/.filehub_trash/ ?`)) return;
-        try {
-          await fetch("/filehub/delete", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              type: slot.type,
-              subfolder: slot.subfolder || "",
-              filename: slot.filename,
-            }),
-          });
-          setPin(i, null);
-        } catch (e) {
-          console.error("[FileHub] delete failed", e);
-        }
-      },
-    });
-    items.push({ label: "Unpin", run: () => setPin(i, null) });
-
-    showContextMenu(items, x, y);
+    if (slot) {
+      items.push({
+        content: "Delete file (soft)",
+        callback: async () => {
+          if (!confirm(`Move ${slot.filename} to ${slot.type}/.filehub_trash/ ?`)) return;
+          try {
+            await fetch("/filehub/delete", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                type: slot.type,
+                subfolder: slot.subfolder || "",
+                filename: slot.filename,
+              }),
+            });
+            setPin(i, null);
+          } catch (e) {
+            console.error("[FileHub] delete failed", e);
+          }
+        },
+      });
+      items.push({ content: "Unpin", callback: () => setPin(i, null) });
+    }
+    new LiteGraph.ContextMenu(items, { event });
   }
 
-  // -- Recents loader ------------------------------------------------------
+  function openRecentContextMenu(ri, event) {
+    const slot = state.recents[ri];
+    if (!slot) return;
+    const items = [
+      { content: "Activate (ad hoc)", callback: () => activateAdHoc(slot) },
+      null,
+      ...Array.from({ length: state.pin_count }, (_, i) => ({
+        content: `Pin to slot ${i + 1}`,
+        callback: () => {
+          setPin(i, slot);
+          activatePin(i);
+        },
+      })),
+    ];
+    new LiteGraph.ContextMenu(items, { event });
+  }
+
+  // --- Drag-drop (OS files) -------------------------------------------------
+
+  node.onDragOver = function (e) {
+    return e.dataTransfer && [...e.dataTransfer.types].includes("Files");
+  };
+  node.onDragDrop = function (e) {
+    const f = e.dataTransfer?.files?.[0];
+    if (!f) return false;
+    const local = canvasToLocal(e);
+    let i = pinHitTest(local[0], local[1]);
+    if (i < 0) i = state.pins.findIndex((p) => !p);
+    if (i < 0) i = 0;
+    uploadAndPin(f, i);
+    return true;
+  };
+  function canvasToLocal(e) {
+    const canvas = app?.canvas;
+    if (canvas && typeof canvas.convertEventToCanvasOffset === "function") {
+      const [cx, cy] = canvas.convertEventToCanvasOffset(e);
+      return [cx - node.pos[0], cy - node.pos[1]];
+    }
+    return [e.offsetX || 0, e.offsetY || 0];
+  }
+
+  // --- Recents fetch --------------------------------------------------------
 
   async function refreshRecents() {
     const src = state.source_tab || "output";
@@ -566,19 +711,18 @@ export function mountLoader(node) {
         filename: f.name,
       }));
       state.recents = list;
-      // Auto-roll only makes sense for outputs (post-generate hot row).
       if (src === "output" && state.auto_roll && list[0]) {
         state.pins[0] = { ...list[0] };
+        refreshPinImages();
       }
-      renderRecents();
-      renderPins();
+      refreshRecentImages();
       writeBack();
     } catch (e) {
       console.error("[FileHub] refreshRecents failed", e);
     }
   }
 
-  // -- Wire events ---------------------------------------------------------
+  // --- Wiring ---------------------------------------------------------------
 
   const onExec = () => refreshRecents();
   const onPinUpdate = (e) => {
@@ -586,7 +730,7 @@ export function mountLoader(node) {
     if (!d || d.loader_id !== node.id) return;
     if (typeof d.slot !== "number" || d.slot < 0 || d.slot >= state.pin_count) return;
     state.pins[d.slot] = { ...d.pin };
-    renderPins();
+    refreshPinImages();
     writeBack();
   };
   api.addEventListener("execution_success", onExec);
@@ -599,64 +743,17 @@ export function mountLoader(node) {
     return origRemoved?.apply(this, arguments);
   };
 
-  // Workflow restore — ComfyUI rehydrates widget values *after* onNodeCreated,
-  // so re-read the hidden widget here and re-render once everything's settled.
   const origOnConfigure = node.onConfigure;
   node.onConfigure = function () {
     const r = origOnConfigure?.apply(this, arguments);
     loadStateFromWidget();
-    renderAll();
+    refreshPinImages();
+    refreshRecentImages();
+    reflowToMinSize();
     setTimeout(() => refreshRecents(), 100);
     return r;
   };
 
-  // -- Helpers -------------------------------------------------------------
-
-  function writeBack() {
-    selWidget.value = JSON.stringify(state);
-    if (selWidget.callback) selWidget.callback(selWidget.value);
-  }
-
-  // Initial render + pull recents on mount.
-  renderAll();
-  // Defer the first network call so we don't race graph init.
+  refreshPinImages();
   setTimeout(() => refreshRecents(), 100);
-}
-
-// -- Tiny context menu (not litegraph; we want it inside the DOM widget) ----
-
-function showContextMenu(items, x, y) {
-  const existing = document.getElementById("fh-ctx");
-  if (existing) existing.remove();
-  const menu = document.createElement("div");
-  menu.id = "fh-ctx";
-  menu.style.cssText = `position:fixed; z-index:99999; background:#222; border:1px solid #444; border-radius:4px; padding:4px 0; font:11px sans-serif; color:#bbb; box-shadow:0 4px 8px #000a; min-width:160px;`;
-  menu.style.left = `${x}px`;
-  menu.style.top = `${y}px`;
-  for (const it of items) {
-    const row = document.createElement("div");
-    row.textContent = it.label;
-    row.style.cssText = "padding:4px 12px; cursor:pointer;";
-    row.addEventListener("mouseenter", () => (row.style.background = "#333"));
-    row.addEventListener("mouseleave", () => (row.style.background = ""));
-    row.addEventListener("click", () => {
-      menu.remove();
-      try {
-        it.run();
-      } catch (e) {
-        console.error(e);
-      }
-    });
-    menu.appendChild(row);
-  }
-  document.body.appendChild(menu);
-  const close = () => {
-    menu.remove();
-    window.removeEventListener("click", close);
-    window.removeEventListener("contextmenu", close);
-  };
-  setTimeout(() => {
-    window.addEventListener("click", close);
-    window.addEventListener("contextmenu", close);
-  }, 0);
 }

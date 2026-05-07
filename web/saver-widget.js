@@ -113,8 +113,14 @@ export function mountSaver(node) {
     hideOnZoom: false,
     getMinHeight: () => 70,
   });
-  node.size = node.size || [320, 110];
-  if (node.size[0] < 280) node.size[0] = 280;
+  // Only enforce a minimum width (so the destination dropdown doesn't squish);
+  // leave height to ComfyUI so OUTPUT_NODE image previews can expand the node.
+  if (!node.size || node.size[0] < 320) {
+    node.size = [320, node.size?.[1] ?? -1];
+    if (node.size[1] < 0 && typeof node.computeSize === "function") {
+      node.size[1] = node.computeSize()[1];
+    }
+  }
 
   function populateLoaders() {
     loaderSel.innerHTML = "";

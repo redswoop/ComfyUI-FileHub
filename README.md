@@ -75,6 +75,7 @@ Restart ComfyUI. Search the node menu for "File Hub Loader" or "File Hub Saver".
 - Tested on ComfyUI 0.19.x with frontend 1.42.x.
 - Pin state lives in the loader node's hidden `selection` widget and serializes with the workflow JSON, so save/load works.
 - The package raises PIL's `MAX_TEXT_MEMORY` to 512 MB at import to prevent ComfyUI-saved PNGs (which embed full prompt+workflow JSON in tEXt chunks) from blowing up `/view` thumbnails.
+- The loader UI is **fully canvas-rendered** (pin tiles, recents row, hamburger action menu, source label) via `onDrawForeground` and `onMouseDown` hit-testing — no DOM widgets. This is why it z-orders correctly with neighboring nodes and matches the active ComfyUI theme. The trade-off is that thumbnails are loaded via JS `Image` objects and drawn into the canvas (still cached, still served by `/view?preview=webp;90`).
 
 ## License
 

@@ -15,9 +15,6 @@ export function injectStyles() {
     .fh-icon-btn { background:#2a2a2a; border:1px solid #444; color:#aaa; border-radius:4px; width:24px; height:22px; cursor:pointer; font:11px sans-serif; padding:0; }
     .fh-icon-btn:hover { border-color:#46b4e6; color:#fff; }
     .fh-section-label { font-size:10px; color:#888; text-transform:uppercase; letter-spacing:0.05em; margin-top:2px; }
-    .fh-recents-header { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:2px; }
-    .fh-recents-header .fh-tabs { gap:3px; }
-    .fh-recents-header .fh-tab { padding:1px 6px; font-size:10px; }
     .fh-strip { display:flex; gap:4px; flex-wrap:wrap; }
     .fh-slot { position:relative; width:64px; height:64px; border:1px dashed #444; border-radius:4px; background:#1a1a1a; cursor:pointer; overflow:hidden; flex:0 0 auto; }
     .fh-slot.filled { border-style:solid; }
