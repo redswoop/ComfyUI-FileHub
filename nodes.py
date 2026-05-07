@@ -212,7 +212,16 @@ class FileHubSaver:
         return {
             "required": {
                 "images": ("IMAGE", {"tooltip": "Images to save."}),
-                "filename_prefix": ("STRING", {"default": "FileHub"}),
+                "filename_prefix": ("STRING", {
+                    "default": "FileHub",
+                    "tooltip": (
+                        "Filename prefix. Supports subfolders ('myproj/img_'), "
+                        "%width% / %height%, %year% / %month% / %day% / %hour% / "
+                        "%minute% / %second%, %date:yyyy-MM-dd% custom formats, "
+                        "and %NodeName.field% to pull values from other nodes "
+                        "(e.g. %Empty Latent Image.width%)."
+                    ),
+                }),
                 "target": ("STRING", {"default": '{"destination":"output"}', "multiline": False}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
