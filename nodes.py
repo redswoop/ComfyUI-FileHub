@@ -218,7 +218,8 @@ class FileHubSaver:
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("path",)
     FUNCTION = "save"
     OUTPUT_NODE = True
     CATEGORY = "image"
@@ -232,7 +233,7 @@ class FileHubSaver:
         if not isinstance(data, dict):
             data = {}
         dest = data.get("destination")
-        if dest not in ("output", "input", "both"):
+        if dest not in ("output", "input", "both", "skip"):
             dest = "output"
         loader_id = data.get("loader_id")
         if not isinstance(loader_id, int):
@@ -262,8 +263,14 @@ class FileHubSaver:
         cfg = self._parse_target(target)
         dest = cfg["destination"]
 
+        # Skip mode: do nothing, return empty path. Lets users keep the saver
+        # in a workflow but no-op specific runs without bypassing the node.
+        if dest == "skip":
+            return {"ui": {"images": []}, "result": ("",)}
+
         results = []
         first_for_pin: dict | None = None
+        first_full_path: str | None = None
 
         for batch_idx, image in enumerate(images):
             metadata = None
@@ -299,6 +306,7 @@ class FileHubSaver:
                 # most naturally reference inputs); else fall back to output.
                 pick = next((w for w in written_paths if w[0] == "input"), written_paths[0])
                 first_for_pin = {"type": pick[0], "filename": pick[2], "subfolder": pick[3]}
+                first_full_path = pick[1]
 
         # Push pin update to the loader if requested.
         if cfg["loader_id"] is not None and cfg["slot"] is not None and first_for_pin is not None:
@@ -315,4 +323,4 @@ class FileHubSaver:
             except Exception as e:
                 log.warning("[FileHub] failed to send pin_update event: %s", e)
 
-        return {"ui": {"images": results}}
+        return {"ui": {"images": results}, "result": (first_full_path or "",)}

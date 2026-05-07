@@ -7,6 +7,7 @@ const DEST_OPTIONS = [
   { value: "output", label: "output/" },
   { value: "input", label: "input/" },
   { value: "both", label: "both" },
+  { value: "skip", label: "skip (no save)" },
 ];
 
 function findLoaderNodes() {
